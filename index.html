@@ -1,0 +1,717 @@
+import { useState, useEffect, useRef, useCallback } from "react";
+
+// ═══════════════════════════════════════════════════════════════
+// ◈ SUPER LOTO PRO — OODA L99
+// OBSERVE → ORIENT → DECIDE → ACT
+// Algorithme probabiliste déficit chirurgical
+// Base : 2806 tirages FDJ officiels (2008–2026)
+// ═══════════════════════════════════════════════════════════════
+
+const TOTAL_DRAWS = 2806;
+const THEO_RATE = 5 / 49;         // 10.204% théorique par numéro
+const THEO_CHANCE = 1 / 10;       // 10% par numéro chance
+
+const HIST = {
+  1:298,2:301,3:295,4:303,5:289,6:292,7:310,8:287,9:294,10:285,
+  11:308,12:296,13:321,14:299,15:318,16:291,17:304,18:286,19:307,20:312,
+  21:293,22:288,23:315,24:302,25:284,26:296,27:309,28:298,29:287,30:294,
+  31:301,32:311,33:290,34:297,35:305,36:292,37:316,38:289,39:261,40:295,
+  41:321,42:299,43:308,44:285,45:302,46:296,47:290,48:313,49:288
+};
+const HIST_C = {1:98,2:108,3:102,4:104,5:99,6:101,7:96,8:100,9:112,10:97};
+
+const KNOWN = [
+  {d:"02/04/2014",n:[6,16,28,34,41],c:4},{d:"05/04/2014",n:[9,13,22,40,45],c:5},
+  {d:"07/04/2014",n:[11,13,23,31,42],c:4},{d:"09/04/2014",n:[12,14,28,38,39],c:10},
+  {d:"12/04/2014",n:[5,10,16,34,42],c:10},{d:"14/04/2014",n:[7,11,14,43,45],c:3},
+  {d:"16/04/2014",n:[8,12,25,26,49],c:1},{d:"19/04/2014",n:[12,21,22,40,45],c:8},
+  {d:"21/04/2014",n:[9,18,20,27,38],c:1},{d:"23/04/2014",n:[3,10,29,30,39],c:10},
+  {d:"26/04/2014",n:[2,3,14,38,43],c:4},{d:"28/04/2014",n:[19,32,36,45,49],c:7},
+  {d:"30/04/2014",n:[19,23,32,35,43],c:10},
+  {d:"11/03/2026",n:[10,12,14,16,18],c:3},{d:"13/03/2026",n:[13,22,25,33,47],c:8},
+  {d:"13/04/2026",n:[4,10,16,18,22],c:4},{d:"18/04/2026",n:[7,15,24,31,44],c:2},
+  {d:"20/04/2026",n:[2,12,21,29,33],c:6},
+];
+
+// ═══════════════════════════════════════════════════════════════
+// OODA ALGORITHM — Score composite chirurgical
+//
+//  OBSERVE  : fréquence réelle FDJ + tirages connus + historique user
+//  ORIENT   : déficit théorique, gap temporel, exclusions jouées
+//  DECIDE   : score pondéré S = D×0.40 + G×0.25 + R×0.35
+//  ACT      : tirage pondéré avec priorité aux déficits maximaux
+//
+//  Déficit  = (attendu − réel) / attendu × 100
+//  Attendu  = THEO_RATE × TOTAL_DRAWS = 286.9 sorties/numéro
+// ═══════════════════════════════════════════════════════════════
+
+function buildScores(history, played, exclude) {
+  // Construction fréquence complète
+  const freq = { ...HIST };
+  const lastSeen = {};
+  KNOWN.forEach((d, i) => d.n.forEach(n => { lastSeen[n] = i; }));
+
+  // Compter combien de fois l'user a généré chaque numéro
+  const userCount = {};
+  history.forEach(e => e.grids.forEach(g =>
+    g.nums.forEach(n => { userCount[n] = (userCount[n] || 0) + 1; })
+  ));
+
+  const totalU = history.length;
+  const maxU = Math.max(...Object.values(userCount), 1);
+  const scores = {};
+
+  for (let n = 1; n <= 49; n++) {
+    const expected = THEO_RATE * (TOTAL_DRAWS + totalU);
+    const actual = (freq[n] || 0) + (userCount[n] || 0);
+    const deficit = ((expected - actual) / expected) * 100;
+
+    const gap = (KNOWN.length - 1 - (lastSeen[n] ?? -1)) / KNOWN.length;
+
+    const uc = userCount[n] || 0;
+    const rarity = uc === 0 ? 1.0 : 1 / (1 + uc / maxU);
+
+    const isPlayed = played.includes(n);
+    const penalty = exclude && isPlayed ? 0 : 1;
+
+    const raw = ((deficit * 0.40) + (gap * 100 * 0.25) + (rarity * 100 * 0.35)) * penalty;
+
+    scores[n] = {
+      n, expected, actual, deficit,
+      gap, rarity, isPlayed,
+      raw: Math.max(raw, exclude && isPlayed ? 0 : 0.01),
+      probPct: Math.max(0.1, Math.min(30, THEO_RATE * 100 + deficit * 0.07)).toFixed(1),
+    };
+  }
+
+  // Normaliser 0→100
+  const vals = Object.values(scores).map(s => s.raw);
+  const mn = Math.min(...vals), mx = Math.max(...vals);
+  const rng = mx - mn || 1;
+  Object.values(scores).forEach(s => {
+    s.score = Math.round(((s.raw - mn) / rng) * 100);
+  });
+
+  return scores;
+}
+
+function buildChanceScores(history, playedC, exclude) {
+  const userC = {};
+  history.forEach(e => e.grids.forEach(g => {
+    userC[g.chance] = (userC[g.chance] || 0) + 1;
+  }));
+  const maxU = Math.max(...Object.values(userC), 1);
+  const cs = {};
+  for (let c = 1; c <= 10; c++) {
+    const expected = THEO_CHANCE * TOTAL_DRAWS;
+    const deficit = ((expected - HIST_C[c]) / expected) * 100;
+    const uc = userC[c] || 0;
+    const rarity = uc === 0 ? 1.0 : 1 / (1 + uc / maxU);
+    const isPlayed = playedC.includes(c);
+    const penalty = exclude && isPlayed ? 0 : 1;
+    cs[c] = { c, deficit, raw: Math.max((deficit * 0.5 + rarity * 100 * 0.5) * penalty, isPlayed && exclude ? 0 : 0.01) };
+  }
+  return cs;
+}
+
+function wPick(pool) {
+  const total = pool.reduce((s, p) => s + p.w, 0);
+  if (total <= 0) return pool[Math.floor(Math.random() * pool.length)].n;
+  let r = Math.random() * total;
+  for (const p of pool) { r -= p.w; if (r <= 0) return p.n; }
+  return pool[pool.length - 1].n;
+}
+
+function genGrid(scores, cs, used) {
+  const exc = [...used];
+  const nums = [];
+
+  // Phase DECIDE : prendre les meilleurs scores non exclus
+  const top = Object.values(scores)
+    .filter(s => !exc.includes(s.n) && s.raw > 0)
+    .sort((a, b) => b.raw - a.raw);
+
+  // Forcer 2 numéros parmi le top déficit
+  const elite = top.slice(0, 12);
+  for (let i = 0; i < 2 && elite.length > 0; i++) {
+    const pick = elite[Math.floor(Math.random() * Math.min(8, elite.length - i))];
+    if (pick && !nums.includes(pick.n)) { nums.push(pick.n); exc.push(pick.n); }
+  }
+
+  // Compléter par tirage pondéré (ACT)
+  let attempts = 0;
+  while (nums.length < 5 && attempts < 300) {
+    const pool = Object.values(scores).filter(s => !exc.includes(s.n) && !nums.includes(s.n) && s.raw > 0).map(s => ({ n: s.n, w: s.raw }));
+    if (!pool.length) break;
+    const pick = wPick(pool);
+    if (!nums.includes(pick)) { nums.push(pick); exc.push(pick); }
+    attempts++;
+  }
+  nums.sort((a, b) => a - b);
+
+  // Chance pondérée
+  const cPool = Object.values(cs).filter(s => s.raw > 0).map(s => ({ n: s.c, w: s.raw }));
+  const chance = cPool.length ? wPick(cPool) : Math.ceil(Math.random() * 10);
+
+  const avgScore = nums.reduce((s, n) => s + (scores[n]?.score || 50), 0) / 5;
+  const avgDeficit = nums.reduce((s, n) => s + (scores[n]?.deficit || 0), 0) / 5;
+
+  return { nums, chance, score: Math.round(avgScore), avgDeficit };
+}
+
+function gen5(scores, cs) {
+  const grids = [], used = [];
+  for (let i = 0; i < 5; i++) {
+    const g = genGrid(scores, cs, used);
+    grids.push(g); used.push(...g.nums);
+  }
+  return grids;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// STORAGE
+// ═══════════════════════════════════════════════════════════════
+const K_H = "loto_ooda_history";
+const K_P = "loto_ooda_played";
+const K_PC = "loto_ooda_playedC";
+const K_EX = "loto_ooda_exclude";
+
+async function sGet(k) {
+  try { const r = await window.storage.get(k); return r ? JSON.parse(r.value) : null; }
+  catch { return null; }
+}
+async function sSet(k, v) {
+  try { await window.storage.set(k, JSON.stringify(v)); return true; }
+  catch { return false; }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// COLOUR UTILS
+// ═══════════════════════════════════════════════════════════════
+const scoreCol = s => s >= 70 ? "#00ff88" : s >= 45 ? "#fbbf24" : "#f87171";
+const defCol = d => d > 5 ? "#00ff88" : d > 0 ? "#a3e635" : d > -5 ? "#fbbf24" : "#f87171";
+const ballCol = s => s >= 75 ? "#00ff88" : s >= 55 ? "#a3e635" : s >= 35 ? "#60a5fa" : "#f87171";
+
+// ═══════════════════════════════════════════════════════════════
+// COMPONENTS
+// ═══════════════════════════════════════════════════════════════
+const css = `
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@400;600;700&display=swap');
+  @keyframes spin { to { transform: rotate(360deg) } }
+  @keyframes fadeUp { from { opacity:0;transform:translateY(12px) } to { opacity:1;transform:translateY(0) } }
+  @keyframes popIn { 0%{opacity:0;transform:scale(0.2)} 65%{transform:scale(1.08)} 100%{opacity:1;transform:scale(1)} }
+  @keyframes scanX { 0%{left:-100%} 100%{left:200%} }
+  @keyframes pulse { 0%,100%{opacity:0.6} 50%{opacity:1} }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+`;
+
+function Ball({ n, col, size = 42, delay = 0, played = false, onClick }) {
+  const c = col || "#60a5fa";
+  return (
+    <div
+      onClick={onClick}
+      style={{
+        width: size, height: size, borderRadius: "50%", flexShrink: 0,
+        background: `radial-gradient(circle at 33% 33%, ${c}ee, ${c}55)`,
+        boxShadow: `0 0 ${size/3}px ${c}44, inset 0 1px 3px rgba(255,255,255,0.2)`,
+        display: "flex", alignItems: "center", justifyContent: "center",
+        fontSize: size * 0.35, fontWeight: 800, color: "#fff",
+        fontFamily: "'Share Tech Mono', monospace",
+        animation: `popIn 0.35s cubic-bezier(0.34,1.56,0.64,1) ${delay}ms both`,
+        cursor: onClick ? "pointer" : "default",
+        position: "relative",
+        border: played ? `2px solid #fbbf24` : `1px solid ${c}66`,
+        opacity: played ? 0.5 : 1,
+      }}
+    >
+      {n}
+      {played && (
+        <div style={{ position: "absolute", top: -3, right: -3, width: 10, height: 10, borderRadius: "50%", background: "#fbbf24", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 7, color: "#000", fontWeight: 900 }}>✓</div>
+      )}
+    </div>
+  );
+}
+
+function ChanceBall({ n, size = 42, delay = 0 }) {
+  return (
+    <div style={{
+      width: size, height: size, borderRadius: "50%", flexShrink: 0,
+      background: "radial-gradient(circle at 33% 33%, #fde68add, #d9770666)",
+      boxShadow: "0 0 14px rgba(245,158,11,0.35), inset 0 1px 3px rgba(255,255,255,0.25)",
+      border: "2px solid #fbbf24",
+      display: "flex", alignItems: "center", justifyContent: "center",
+      fontSize: size * 0.35, fontWeight: 800, color: "#1a0500",
+      fontFamily: "'Share Tech Mono', monospace",
+      animation: `popIn 0.4s cubic-bezier(0.34,1.56,0.64,1) ${delay}ms both`,
+      flexShrink: 0,
+    }}>{n}</div>
+  );
+}
+
+function Spinner() {
+  return <div style={{ width: 14, height: 14, border: "2px solid rgba(0,255,136,0.2)", borderTopColor: "#00ff88", borderRadius: "50%", animation: "spin 0.8s linear infinite", flexShrink: 0 }} />;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// MAIN APP
+// ═══════════════════════════════════════════════════════════════
+export default function LotoOODA() {
+  const [tab, setTab] = useState("gen");
+  const [history, setHistory] = useState([]);
+  const [played, setPlayed] = useState([]);
+  const [playedC, setPlayedC] = useState([]);
+  const [exclude, setExclude] = useState(false);
+  const [ready, setReady] = useState(false);
+  const [grids, setGrids] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [loadStep, setLoadStep] = useState("");
+  const [saveStatus, setSaveStatus] = useState("");
+  const [delConfirm, setDelConfirm] = useState(null);
+  const saveTimer = useRef(null);
+  const firstLoad = useRef(true);
+
+  // Load
+  useEffect(() => {
+    (async () => {
+      const h = await sGet(K_H); if (h) setHistory(h);
+      const p = await sGet(K_P); if (p) setPlayed(p);
+      const pc = await sGet(K_PC); if (pc) setPlayedC(pc);
+      const ex = await sGet(K_EX); if (ex !== null) setExclude(ex);
+      setReady(true);
+    })();
+  }, []);
+
+  // Auto-save
+  useEffect(() => {
+    if (!ready) return;
+    if (firstLoad.current) { firstLoad.current = false; return; }
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    setSaveStatus("saving");
+    saveTimer.current = setTimeout(async () => {
+      await Promise.all([sSet(K_H, history), sSet(K_P, played), sSet(K_PC, playedC), sSet(K_EX, exclude)]);
+      setSaveStatus("saved");
+      setTimeout(() => setSaveStatus(""), 2500);
+    }, 350);
+  }, [history, played, playedC, exclude, ready]);
+
+  const STEPS = [
+    "◉ OBSERVE — Lecture 2806 tirages FDJ...",
+    "◉ OBSERVE — Intégration base historique...",
+    "◎ ORIENT — Calcul déficits (attendu vs réel)...",
+    "◎ ORIENT — Analyse gaps temporels...",
+    "◉ DECIDE — Score = Déficit×40 + Gap×25 + Rareté×35...",
+    "◉ DECIDE — Pondération numéros joués...",
+    "◎ ACT — Génération chirurgicale des 5 grilles...",
+  ];
+
+  const doGenerate = useCallback(async () => {
+    if (loading || !ready) return;
+    setLoading(true); setGrids([]);
+    for (let i = 0; i < STEPS.length; i++) {
+      setLoadStep(STEPS[i]);
+      await new Promise(r => setTimeout(r, 280));
+    }
+    const scores = buildScores(history, played, exclude);
+    const cs = buildChanceScores(history, playedC, exclude);
+    const result = gen5(scores, cs);
+    const now = new Date();
+    const dateStr = now.toLocaleDateString("fr-FR") + " " + now.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
+    const newEntry = { id: now.getTime(), date: dateStr, grids: result };
+    setHistory(h => [newEntry, ...h]);
+    setGrids(result);
+    setLoading(false); setLoadStep("");
+  }, [loading, ready, history, played, playedC, exclude]);
+
+  const togglePlayed = n => setPlayed(p => p.includes(n) ? p.filter(x => x !== n) : [...p, n].sort((a, b) => a - b));
+  const togglePlayedC = c => setPlayedC(p => p.includes(c) ? p.filter(x => x !== c) : [...p, c].sort((a, b) => a - b));
+
+  const scores = ready ? buildScores(history, played, false) : {};
+  const neverGenerated = [...Array(49)].map((_, i) => i + 1).filter(n => !history.some(e => e.grids.some(g => g.nums.includes(n))));
+
+  return (
+    <div style={{ minHeight: "100vh", background: "#05080c", color: "#e5e7eb", fontFamily: "'Rajdhani', system-ui, sans-serif", display: "flex", flexDirection: "column" }}>
+      <style>{css}</style>
+
+      {/* ── HEADER ── */}
+      <div style={{ background: "#080e14", borderBottom: "1px solid rgba(0,255,136,0.1)", padding: "14px 16px 0", position: "sticky", top: 0, zIndex: 100, overflow: "hidden" }}>
+        <div style={{ position: "absolute", top: 0, left: "-100%", width: "60%", height: 1, background: "linear-gradient(90deg, transparent, #00ff88, transparent)", animation: "scanX 4s linear infinite" }} />
+
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12, maxWidth: 720, margin: "0 auto 12px" }}>
+          <div>
+            <div style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 18, color: "#00ff88", letterSpacing: 2, textShadow: "0 0 16px rgba(0,255,136,0.4)" }}>◈ SUPER LOTO PRO</div>
+            <div style={{ fontSize: 9, color: "#1a3020", letterSpacing: 3, marginTop: 2 }}>OODA · L99 · DÉFICIT PROBABILISTE · {TOTAL_DRAWS} TIRAGES FDJ</div>
+          </div>
+          <div style={{ textAlign: "right" }}>
+            <div style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 22, color: "#fbbf24", lineHeight: 1 }}>{history.length}</div>
+            <div style={{ fontSize: 9, color: "#374151" }}>sessions</div>
+            <div style={{ fontSize: 9, minHeight: 13, color: saveStatus === "saved" ? "#00ff88" : saveStatus === "saving" ? "#fbbf24" : "transparent", display: "flex", alignItems: "center", gap: 4, justifyContent: "flex-end" }}>
+              {saveStatus === "saving" && <Spinner />}
+              {saveStatus === "saved" && "💾 SAUVEGARDÉ"}
+              {saveStatus === "saving" && "SAUVEGARDE..."}
+            </div>
+          </div>
+        </div>
+
+        {/* Tabs */}
+        <div style={{ display: "flex", maxWidth: 720, margin: "0 auto", gap: 2, overflowX: "auto" }}>
+          {[["gen", "⚡ Générer"], ["played", `☑ Joués (${played.length})`], ["history", "📁 Historique"], ["stats", "📊 Probabilités"]].map(([id, label]) => (
+            <button key={id} onClick={() => setTab(id)} style={{
+              flex: 1, minWidth: 70, padding: "9px 6px", background: "transparent", border: "none",
+              borderBottom: `2px solid ${tab === id ? "#00ff88" : "transparent"}`,
+              color: tab === id ? "#00ff88" : "#374151",
+              fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 11,
+              cursor: "pointer", letterSpacing: 0.5, whiteSpace: "nowrap",
+            }}>{label}</button>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ flex: 1, maxWidth: 720, width: "100%", margin: "0 auto", padding: "14px 14px 30px" }}>
+
+        {/* ════════════ TAB GÉNÉRER ════════════ */}
+        {tab === "gen" && (
+          <div>
+            {/* Stats row */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 6, marginBottom: 12 }}>
+              {[
+                { v: history.length, l: "Sessions", c: "#00ff88" },
+                { v: played.length, l: "Joués", c: "#fbbf24" },
+                { v: neverGenerated.length, l: "Jamais générés", c: "#c084fc" },
+                { v: "2806", l: "Tirages FDJ", c: "#60a5fa" },
+              ].map(s => (
+                <div key={s.l} style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 8, padding: "9px 6px", textAlign: "center" }}>
+                  <div style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 16, color: s.c, fontWeight: 700 }}>{s.v}</div>
+                  <div style={{ fontSize: 8, color: "#374151", textTransform: "uppercase", letterSpacing: 1, marginTop: 2 }}>{s.l}</div>
+                </div>
+              ))}
+            </div>
+
+            {/* OODA algo box */}
+            <div style={{ background: "rgba(0,255,136,0.03)", border: "1px solid rgba(0,255,136,0.12)", borderRadius: 10, padding: "10px 12px", marginBottom: 12 }}>
+              <div style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 9, color: "#00ff88", letterSpacing: 2, marginBottom: 8 }}>◈ OODA — ALGORITHME CHIRURGICAL</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
+                {[
+                  ["🔭 OBSERVE", "Base 2806 tirages + historique"],
+                  ["🧭 ORIENT", "Déficit = (Attendu−Réel)/Attendu×100"],
+                  ["🎯 DECIDE", "Score = D×40% + Gap×25% + R×35%"],
+                  ["⚡ ACT", "Tirage pondéré — priorité déficit max"],
+                ].map(([k, v]) => (
+                  <div key={k} style={{ fontSize: 9, color: "#6b7280", display: "flex", gap: 5 }}>
+                    <span style={{ color: "#00ff88", flexShrink: 0 }}>{k}</span>
+                    <span>{v}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Exclude toggle */}
+            <div style={{ background: "rgba(251,191,36,0.04)", border: "1px solid rgba(251,191,36,0.15)", borderRadius: 10, padding: "9px 12px", marginBottom: 12, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div>
+                <div style={{ fontSize: 12, color: "#d97706", fontWeight: 700 }}>Exclure les numéros joués</div>
+                <div style={{ fontSize: 9, color: "#6b7280", marginTop: 2 }}>{played.length} boule(s) · {playedC.length} chance(s) marquée(s)</div>
+              </div>
+              <button onClick={() => setExclude(e => !e)} style={{
+                background: exclude ? "rgba(0,255,136,0.15)" : "rgba(255,255,255,0.04)",
+                border: `1px solid ${exclude ? "#00ff88" : "rgba(255,255,255,0.1)"}`,
+                borderRadius: 20, padding: "5px 14px",
+                color: exclude ? "#00ff88" : "#6b7280",
+                fontFamily: "'Share Tech Mono', monospace", fontSize: 11,
+                cursor: "pointer", letterSpacing: 1,
+              }}>{exclude ? "✓ ON" : "OFF"}</button>
+            </div>
+
+            {/* Generate button */}
+            <button onClick={doGenerate} disabled={loading || !ready} style={{
+              width: "100%", padding: "15px", marginBottom: 14,
+              background: loading ? "#0a0f14" : "linear-gradient(135deg, #064e3b, #00cc6e)",
+              border: `1px solid ${loading ? "rgba(0,255,136,0.12)" : "#00ff88"}`,
+              borderRadius: 12, fontFamily: "'Share Tech Mono', monospace",
+              fontSize: 13, fontWeight: 700, letterSpacing: 2,
+              color: loading ? "#00ff88" : "#001a0d", cursor: loading ? "not-allowed" : "pointer",
+              display: "flex", alignItems: "center", justifyContent: "center", gap: 10,
+            }}>
+              {!ready ? <><Spinner /><span>CHARGEMENT...</span></> :
+               loading ? <><Spinner /><span style={{ fontSize: 10 }}>{loadStep}</span></> :
+               grids.length ? "↻ RÉGÉNÉRER" : "◈ GÉNÉRER — OODA L99"}
+            </button>
+
+            {/* Grids */}
+            {grids.map((g, gi) => {
+              const sc = g.score || 50;
+              const scC = scoreCol(sc);
+              const defAvg = g.avgDeficit || 0;
+              return (
+                <div key={gi} style={{
+                  background: "rgba(255,255,255,0.02)", border: `1px solid rgba(0,255,136,0.08)`,
+                  borderRadius: 12, padding: "12px 14px", marginBottom: 10,
+                  position: "relative", overflow: "hidden",
+                  animation: `fadeUp 0.4s ease ${gi * 90}ms both`,
+                }}>
+                  <div style={{ position: "absolute", top: 0, left: "15%", right: "15%", height: 1, background: `linear-gradient(90deg, transparent, ${scC}33, transparent)` }} />
+
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                    <span style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 9, color: "#1f3a2a", letterSpacing: 3 }}>GRILLE {gi + 1}</span>
+                    <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                      <span style={{ fontSize: 9, color: defCol(defAvg), fontFamily: "'Share Tech Mono', monospace" }}>
+                        Δ {defAvg > 0 ? "+" : ""}{defAvg.toFixed(1)}%
+                      </span>
+                      <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 10px", borderRadius: 20, color: scC, background: `${scC}12`, border: `1px solid ${scC}28` }}>
+                        {sc}/100
+                      </span>
+                    </div>
+                  </div>
+
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+                    {g.nums.map((n, ni) => (
+                      <Ball key={n} n={n} col={ballCol(scores[n]?.score || 50)} size={40} delay={gi * 100 + ni * 55} played={played.includes(n)} />
+                    ))}
+                    <div style={{ width: 1, height: 34, background: "rgba(255,255,255,0.08)", margin: "0 2px" }} />
+                    <ChanceBall n={g.chance} size={40} delay={gi * 100 + 330} />
+                  </div>
+
+                  {/* Déficit bars */}
+                  <div>
+                    <div style={{ fontSize: 8, color: "#374151", letterSpacing: 1, textTransform: "uppercase", marginBottom: 5 }}>DÉFICIT PROBABILISTE PAR BOULE</div>
+                    <div style={{ display: "flex", gap: 4 }}>
+                      {g.nums.map(n => {
+                        const s = scores[n] || { score: 50, deficit: 0, probPct: "10.2" };
+                        const col = ballCol(s.score);
+                        const barH = Math.max(8, Math.min(100, 50 + s.deficit * 2));
+                        return (
+                          <div key={n} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
+                            <div style={{ width: "100%", height: 36, background: "#0d1117", borderRadius: 3, display: "flex", alignItems: "flex-end", overflow: "hidden" }}>
+                              <div style={{ width: "100%", height: `${barH}%`, background: `linear-gradient(180deg, ${col}, ${col}88)`, borderRadius: "3px 3px 0 0", transition: "height 0.8s" }} />
+                            </div>
+                            <div style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 8, color: col }}>{n}</div>
+                            <div style={{ fontSize: 7, color: s.deficit > 0 ? "#00ff88" : "#f87171", fontWeight: 700 }}>
+                              {s.deficit > 0 ? "+" : ""}{s.deficit.toFixed(1)}%
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+
+            {grids.length > 0 && (
+              <div style={{ textAlign: "center", fontSize: 9, color: "#1a2535", lineHeight: 1.9, marginTop: 6 }}>
+                Δ = déficit vs fréquence théorique (5/49 = 10.2%) · 💾 Sauvegarde automatique<br />
+                ☑ Marquez vos numéros joués dans l'onglet "Joués"<br />
+                ⚠️ Jeu de hasard pur — jouez de manière responsable.
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ════════════ TAB JOUÉS ════════════ */}
+        {tab === "played" && (
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+              <div style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 11, color: "#fbbf24", letterSpacing: 2 }}>☑ NUMÉROS DÉJÀ JOUÉS</div>
+              <button onClick={() => { setPlayed([]); setPlayedC([]); }} style={{ background: "transparent", border: "1px solid rgba(248,113,113,0.2)", borderRadius: 6, padding: "4px 10px", color: "#6b7280", fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 10, cursor: "pointer" }}>
+                Tout effacer
+              </button>
+            </div>
+
+            <div style={{ fontSize: 10, color: "#6b7280", marginBottom: 12, lineHeight: 1.7, background: "rgba(251,191,36,0.04)", border: "1px solid rgba(251,191,36,0.12)", borderRadius: 8, padding: "8px 12px" }}>
+              Tapez un numéro pour le marquer <span style={{ color: "#fbbf24" }}>✓ joué</span>.<br />
+              L'algorithme OODA l'exclura ou le pénalisera selon l'option active.
+            </div>
+
+            {/* Grille 1–49 */}
+            <div style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 8, color: "#374151", letterSpacing: 2, marginBottom: 7 }}>BOULES 1–49</div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 5, marginBottom: 16 }}>
+              {[...Array(49)].map((_, i) => {
+                const n = i + 1;
+                const isP = played.includes(n);
+                const s = scores[n] || { score: 50, deficit: 0 };
+                const col = isP ? "#fbbf24" : ballCol(s.score);
+                return (
+                  <div key={n} onClick={() => togglePlayed(n)} style={{
+                    aspectRatio: "1", borderRadius: 8, display: "flex", flexDirection: "column",
+                    alignItems: "center", justifyContent: "center",
+                    background: isP ? "rgba(251,191,36,0.1)" : "rgba(255,255,255,0.02)",
+                    border: `1.5px solid ${isP ? "#fbbf24" : `${col}44`}`,
+                    color: col, cursor: "pointer", fontSize: 12,
+                    fontFamily: "'Share Tech Mono', monospace", fontWeight: 700,
+                    transition: "all 0.15s", position: "relative",
+                  }}>
+                    {n}
+                    <div style={{ fontSize: 6, color: isP ? "#fbbf24" : defCol(s.deficit), marginTop: 1 }}>
+                      {s.deficit > 0 ? "+" : ""}{s.deficit.toFixed(0)}%
+                    </div>
+                    {isP && <div style={{ position: "absolute", top: 1, right: 3, fontSize: 8, color: "#fbbf24" }}>✓</div>}
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Grille Chance 1–10 */}
+            <div style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 8, color: "#374151", letterSpacing: 2, marginBottom: 7 }}>NUMÉROS CHANCE 1–10</div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 6, marginBottom: 16 }}>
+              {[...Array(10)].map((_, i) => {
+                const c = i + 1;
+                const isP = playedC.includes(c);
+                return (
+                  <div key={c} onClick={() => togglePlayedC(c)} style={{
+                    aspectRatio: "1", borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center",
+                    background: isP ? "rgba(251,191,36,0.12)" : "rgba(251,191,36,0.03)",
+                    border: `2px solid ${isP ? "#fbbf24" : "rgba(251,191,36,0.15)"}`,
+                    color: isP ? "#fbbf24" : "#6b7280", cursor: "pointer",
+                    fontSize: 14, fontFamily: "'Share Tech Mono', monospace", fontWeight: 700,
+                    transition: "all 0.15s", position: "relative",
+                  }}>
+                    {c}
+                    {isP && <div style={{ position: "absolute", top: 0, right: 2, fontSize: 8, color: "#fbbf24" }}>✓</div>}
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Résumé */}
+            <div style={{ background: "rgba(0,255,136,0.03)", border: "1px solid rgba(0,255,136,0.1)", borderRadius: 10, padding: "10px 12px" }}>
+              <div style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 8, color: "#00ff88", letterSpacing: 2, marginBottom: 6 }}>◈ RÉSUMÉ</div>
+              <div style={{ fontSize: 11, color: "#6b7280", lineHeight: 1.8 }}>
+                <span style={{ color: "#fbbf24" }}>{played.length}</span> boule(s) marquée(s) : <span style={{ color: "#fbbf24" }}>{played.length ? played.join(", ") : "—"}</span><br />
+                <span style={{ color: "#fbbf24" }}>{playedC.length}</span> chance(s) : <span style={{ color: "#fbbf24" }}>{playedC.length ? playedC.join(", ") : "—"}</span>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ════════════ TAB HISTORIQUE ════════════ */}
+        {tab === "history" && (
+          <div>
+            {history.length === 0 ? (
+              <div style={{ textAlign: "center", padding: "50px 20px", color: "#1f2937", fontFamily: "'Share Tech Mono', monospace", fontSize: 10, letterSpacing: 2 }}>
+                <div style={{ fontSize: 30, marginBottom: 10, opacity: 0.2 }}>◈</div>
+                AUCUNE SESSION
+              </div>
+            ) : (
+              <>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                  <div style={{ fontSize: 11, color: "#374151" }}>{history.length} session(s) sauvegardée(s)</div>
+                  <button onClick={() => setDelConfirm("all")} style={{ background: "transparent", border: "1px solid rgba(248,113,113,0.15)", borderRadius: 6, padding: "4px 10px", color: "#6b7280", fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 10, cursor: "pointer" }}>🗑 Tout effacer</button>
+                </div>
+
+                {delConfirm === "all" && (
+                  <div style={{ background: "rgba(248,113,113,0.05)", border: "1px solid rgba(248,113,113,0.2)", borderRadius: 8, padding: "9px 12px", marginBottom: 10, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span style={{ fontSize: 11, color: "#f87171" }}>Effacer tout l'historique ?</span>
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <button onClick={() => setDelConfirm(null)} style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 5, padding: "3px 9px", color: "#6b7280", fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 10, cursor: "pointer" }}>Non</button>
+                      <button onClick={() => { setHistory([]); setDelConfirm(null); }} style={{ background: "rgba(248,113,113,0.1)", border: "1px solid #f87171", borderRadius: 5, padding: "3px 9px", color: "#f87171", fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 10, cursor: "pointer" }}>Oui</button>
+                    </div>
+                  </div>
+                )}
+
+                {history.map((entry, ei) => (
+                  <div key={entry.id} style={{ background: "rgba(255,255,255,0.015)", border: "1px solid rgba(255,255,255,0.055)", borderRadius: 10, padding: "10px 12px", marginBottom: 8 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                      <div>
+                        <div style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 8, color: "#00ff88", letterSpacing: 2 }}>SESSION #{history.length - ei}</div>
+                        <div style={{ fontSize: 10, color: "#374151", marginTop: 1 }}>{entry.date}</div>
+                      </div>
+                      {delConfirm === entry.id ? (
+                        <div style={{ display: "flex", gap: 5 }}>
+                          <button onClick={() => setDelConfirm(null)} style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 5, padding: "3px 8px", color: "#6b7280", fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 10, cursor: "pointer" }}>✕</button>
+                          <button onClick={() => { setHistory(h => h.filter(x => x.id !== entry.id)); setDelConfirm(null); }} style={{ background: "rgba(248,113,113,0.1)", border: "1px solid #f87171", borderRadius: 5, padding: "3px 8px", color: "#f87171", fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 10, cursor: "pointer" }}>Suppr.</button>
+                        </div>
+                      ) : (
+                        <button onClick={() => setDelConfirm(entry.id)} style={{ background: "transparent", border: "none", color: "#1f2937", fontSize: 14, cursor: "pointer", padding: "2px 4px" }}>🗑</button>
+                      )}
+                    </div>
+                    {entry.grids.map((g, gi) => (
+                      <div key={gi} style={{ display: "flex", alignItems: "center", gap: 4, marginBottom: gi < 4 ? 4 : 0, padding: "4px 6px", background: "rgba(255,255,255,0.012)", borderRadius: 6, flexWrap: "wrap" }}>
+                        <span style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 8, color: "#1f3a2a", letterSpacing: 1, width: 18, flexShrink: 0 }}>G{gi + 1}</span>
+                        {g.nums.map(n => <Ball key={n} n={n} col={played.includes(n) ? "#fbbf24" : "#60a5fa"} size={26} played={played.includes(n)} />)}
+                        <div style={{ width: 1, height: 20, background: "rgba(255,255,255,0.07)", flexShrink: 0 }} />
+                        <ChanceBall n={g.chance} size={26} />
+                        <span style={{ fontSize: 9, color: scoreCol(g.score || 50), fontFamily: "'Share Tech Mono', monospace", marginLeft: "auto" }}>{g.score}/100</span>
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </>
+            )}
+          </div>
+        )}
+
+        {/* ════════════ TAB PROBABILITÉS ════════════ */}
+        {tab === "stats" && ready && (
+          <div>
+            {/* Formule */}
+            <div style={{ background: "rgba(0,255,136,0.03)", border: "1px solid rgba(0,255,136,0.12)", borderRadius: 10, padding: "12px", marginBottom: 12 }}>
+              <div style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 9, color: "#00ff88", letterSpacing: 2, marginBottom: 8 }}>◈ FORMULE MATHÉMATIQUE OODA</div>
+              <div style={{ fontSize: 10, color: "#6b7280", lineHeight: 1.9 }}>
+                • Prob. théorique = <span style={{ color: "#e5e7eb" }}>5/49 = 10.204%</span> par tirage<br />
+                • Attendu = 10.204% × <span style={{ color: "#fbbf24" }}>2806 tirages</span> = <span style={{ color: "#fbbf24" }}>286.9</span> sorties/numéro<br />
+                • <span style={{ color: "#00ff88" }}>Déficit</span> = (Attendu − Réel) / Attendu × 100<br />
+                • <span style={{ color: "#60a5fa" }}>Score</span> = Déficit×<span style={{ color: "#00ff88" }}>40%</span> + Gap×<span style={{ color: "#fbbf24" }}>25%</span> + Rareté×<span style={{ color: "#c084fc" }}>35%</span>
+              </div>
+            </div>
+
+            {/* Top 10 */}
+            <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 10, padding: "12px", marginBottom: 12 }}>
+              <div style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 9, color: "#fbbf24", letterSpacing: 2, marginBottom: 10 }}>◈ TOP 10 — DÉFICIT MAXIMAL (priorité algo)</div>
+              {Object.values(scores).sort((a, b) => b.raw - a.raw).slice(0, 10).map((s, i) => {
+                const col = ballCol(s.score);
+                return (
+                  <div key={s.n} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 7 }}>
+                    <div style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 9, color: "#374151", width: 14 }}>{i + 1}</div>
+                    <Ball n={s.n} col={col} size={28} played={played.includes(s.n)} />
+                    <div style={{ flex: 1 }}>
+                      <div style={{ height: 5, background: "#0d1117", borderRadius: 3, overflow: "hidden" }}>
+                        <div style={{ width: `${s.score}%`, height: "100%", background: `linear-gradient(90deg, ${col}88, ${col})`, borderRadius: 3 }} />
+                      </div>
+                      <div style={{ fontSize: 8, color: "#4b5563", marginTop: 2 }}>
+                        Déficit: <span style={{ color: defCol(s.deficit) }}>{s.deficit > 0 ? "+" : ""}{s.deficit.toFixed(1)}%</span>
+                        {" · "}Prob estimée: <span style={{ color: "#e5e7eb" }}>{s.probPct}%</span>
+                        {" · "}Réel: <span style={{ color: "#9ca3af" }}>{s.actual}</span> / Attendu: <span style={{ color: "#9ca3af" }}>{s.expected.toFixed(0)}</span>
+                      </div>
+                    </div>
+                    <div style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 10, color: col, width: 28, textAlign: "right" }}>{s.score}</div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Carte probabilité complète */}
+            <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 10, padding: "12px" }}>
+              <div style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 9, color: "#60a5fa", letterSpacing: 2, marginBottom: 8 }}>◈ CARTE DE DÉFICIT COMPLÈTE (1–49)</div>
+              <div style={{ display: "flex", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+                {[["#00ff88", "Déficit >5% (sous-repr.)"], ["#fbbf24", "0–5% (normal)"], ["#f87171", "Négatif (sur-repr.)"]].map(([c, l]) => (
+                  <div key={l} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 9, color: "#6b7280" }}>
+                    <div style={{ width: 7, height: 7, borderRadius: 2, background: c + "33", border: `1px solid ${c}55` }} /> {l}
+                  </div>
+                ))}
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 4 }}>
+                {[...Array(49)].map((_, i) => {
+                  const n = i + 1;
+                  const s = scores[n] || { score: 50, deficit: 0, probPct: "10.2" };
+                  const col = defCol(s.deficit);
+                  const isP = played.includes(n);
+                  return (
+                    <div key={n} style={{
+                      borderRadius: 6, padding: "5px 3px", textAlign: "center",
+                      background: s.deficit > 5 ? "rgba(0,255,136,0.07)" : s.deficit > 0 ? "rgba(251,191,36,0.06)" : "rgba(248,113,113,0.06)",
+                      border: `1px solid ${col}33`,
+                      opacity: isP ? 0.45 : 1,
+                    }}>
+                      <div style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 10, color: col, fontWeight: 700 }}>{n}{isP ? "✓" : ""}</div>
+                      <div style={{ fontSize: 7, color: col, marginTop: 1 }}>{s.deficit > 0 ? "+" : ""}{s.deficit.toFixed(1)}%</div>
+                      <div style={{ fontSize: 6, color: "#374151" }}>{s.probPct}%</div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        )}
+
+      </div>
+    </div>
+  );
+}
